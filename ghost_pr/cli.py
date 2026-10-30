@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 
 from ghost_pr.engine import Outcome, mutate_lte_to_lt, run_pytest
+from ghost_pr.haunt import haunt_staged_changes
 
 
 # ── Paths ───────────────────────────────────────────────────────────
@@ -105,7 +106,7 @@ def _run_demo() -> int:
         if mutant.outcome == Outcome.PASSED:
             mutant_status = "SURVIVED"
             print("  🧟  MUTANT SURVIVED — the existing tests did NOT catch the change.")
-            print("       ➜  Consider adding a boundary test, e.g.  withdraw(100, 100) == 0")
+            print("       ➜  [Example hint, not AI-generated] Consider adding a boundary test, e.g.  withdraw(100, 100) == 0")
         elif mutant.outcome == Outcome.FAILED:
             mutant_status = "KILLED"
             print("  🎯  MUTANT KILLED — the tests caught the mutation.  Nice coverage!")
@@ -141,11 +142,19 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Run with the bundled demo fixture (withdraw function)",
     )
+    haunt_parser.add_argument(
+        "--repo",
+        default=None,
+        help="Path to repository root (defaults to searching from current working directory)",
+    )
 
     args = parser.parse_args(argv)
 
-    if args.command == "haunt" and args.demo:
-        sys.exit(_run_demo())
+    if args.command == "haunt":
+        if args.demo:
+            sys.exit(_run_demo())
+        else:
+            sys.exit(haunt_staged_changes(repo_dir=args.repo))
     else:
         parser.print_help()
         sys.exit(1)

@@ -5,15 +5,20 @@ This module provides:
     in a Python source string, using the `ast` module.
   - `run_pytest`: runs pytest in a subprocess with a timeout and returns
     a structured `TestResult`.
+  - `find_mutation_candidates`: locates supported single-line ``<=`` comparisons
+    on specific changed lines, explicitly flagging multiline comparisons.
+  - `apply_mutation_to_source`: applies a specific mutation candidate to source code.
 """
 
 from __future__ import annotations
 
 import ast
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
 from enum import Enum, auto
+from pathlib import Path
 from typing import Optional
 
 
@@ -49,11 +54,19 @@ _PYTEST_EXIT_MAP: dict[int, Outcome] = {
 }
 
 
-def run_pytest(directory: str, *, timeout: int = 30) -> TestResult:
+def run_pytest(
+    directory: str,
+    *,
+    timeout: int = 30,
+    env: dict[str, str] | None = None,
+) -> TestResult:
     """Run ``pytest`` inside *directory* and return a `TestResult`.
 
     Uses the **active Python interpreter** (``sys.executable``) so that
     the correct virtual-environment pytest is invoked.
+
+    Ensures tests import code from *directory* (and *directory/src* if present)
+    by prepending them to ``PYTHONPATH``.
 
     Parameters
     ----------
@@ -61,14 +74,29 @@ def run_pytest(directory: str, *, timeout: int = 30) -> TestResult:
         Working directory that contains the tests.
     timeout:
         Maximum seconds before the subprocess is killed.
+    env:
+        Optional environment dictionary override.
     """
+    run_env = dict(os.environ if env is None else env)
+    abs_dir = str(Path(directory).resolve())
+    paths = [abs_dir]
+    src_dir = Path(directory) / "src"
+    if src_dir.is_dir():
+        paths.append(str(src_dir.resolve()))
+    curr_pythonpath = run_env.get("PYTHONPATH", "")
+    if curr_pythonpath:
+        paths.append(curr_pythonpath)
+    run_env["PYTHONPATH"] = os.pathsep.join(paths)
+    run_env["PYTHONDONTWRITEBYTECODE"] = "1"
+
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", "pytest", "-x", "-q", "--tb=short"],
+            [sys.executable, "-B", "-m", "pytest", "-x", "-q", "--tb=short"],
             cwd=directory,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=run_env,
         )
         outcome = _PYTEST_EXIT_MAP.get(proc.returncode, Outcome.EXECUTION_ERROR)
         return TestResult(
@@ -88,12 +116,121 @@ def run_pytest(directory: str, *, timeout: int = 30) -> TestResult:
 
 # ── AST mutation ────────────────────────────────────────────────────
 
+@dataclass
+class MutationCandidate:
+    """A specific AST mutation opportunity."""
+    file_path: str
+    lineno: int
+    col_offset: int
+    original_expr: str
+    mutated_expr: str
+    op_index: int = 0
+
+
+@dataclass
+class SkippedMutation:
+    """A mutation candidate skipped due to policy or unsupported syntax."""
+    file_path: str
+    lineno: int
+    reason: str
+
+
+def find_mutation_candidates(
+    source: str,
+    file_path: str,
+    changed_lines: set[int],
+) -> tuple[list[MutationCandidate], list[SkippedMutation]]:
+    """Scan *source* for ``<=`` comparisons on lines present in *changed_lines*.
+
+    Skips unsupported multiline comparisons explicitly.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return [], []
+
+    candidates: list[MutationCandidate] = []
+    skipped: list[SkippedMutation] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+
+        has_lte = any(isinstance(op, ast.LtE) for op in node.ops)
+        if not has_lte:
+            continue
+
+        is_multiline = node.end_lineno is not None and node.end_lineno > node.lineno
+        if is_multiline:
+            # Check if any changed lines overlap with this multiline compare
+            end_line = node.end_lineno if node.end_lineno is not None else node.lineno
+            node_lines = set(range(node.lineno, end_line + 1))
+            if node_lines & changed_lines:
+                skipped.append(
+                    SkippedMutation(
+                        file_path=file_path,
+                        lineno=node.lineno,
+                        reason="multiline comparison (unsupported)",
+                    )
+                )
+            continue
+
+        if node.lineno not in changed_lines:
+            continue
+
+        for idx, op in enumerate(node.ops):
+            if isinstance(op, ast.LtE):
+                orig_expr = ast.unparse(node)
+                mutated_node = ast.Compare(
+                    left=node.left,
+                    ops=[ast.Lt() if i == idx else o for i, o in enumerate(node.ops)],
+                    comparators=node.comparators,
+                )
+                mut_expr = ast.unparse(mutated_node)
+                candidates.append(
+                    MutationCandidate(
+                        file_path=file_path,
+                        lineno=node.lineno,
+                        col_offset=node.col_offset,
+                        original_expr=orig_expr,
+                        mutated_expr=mut_expr,
+                        op_index=idx,
+                    )
+                )
+
+    # Deterministic sorting: by line number, then column offset, then op index
+    candidates.sort(key=lambda c: (c.lineno, c.col_offset, c.op_index))
+    skipped.sort(key=lambda s: s.lineno)
+
+    return candidates, skipped
+
+
+def apply_mutation_to_source(source: str, candidate: MutationCandidate) -> str:
+    """Apply a single `MutationCandidate` to *source* and return rewritten code."""
+    tree = ast.parse(source)
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Compare)
+            and node.lineno == candidate.lineno
+            and node.col_offset == candidate.col_offset
+        ):
+            if candidate.op_index < len(node.ops) and isinstance(
+                node.ops[candidate.op_index], ast.LtE
+            ):
+                node.ops[candidate.op_index] = ast.Lt()
+                break
+
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
+
+
+# ── Milestone 1 Legacy / Demo Helpers ───────────────────────────────
+
 class _LtEToLt(ast.NodeTransformer):
     """Replace the *first* ``<=`` (LtE) comparison with ``<`` (Lt).
 
-    After the first replacement, the transformer sets ``self.mutated``
-    to *True* and records the original & mutated expressions.  All
-    subsequent ``<=`` nodes are left untouched.
+    Used by the Milestone 1 `--demo` workflow.
     """
 
     def __init__(self) -> None:
@@ -108,15 +245,9 @@ class _LtEToLt(ast.NodeTransformer):
 
         for idx, op in enumerate(node.ops):
             if isinstance(op, ast.LtE):
-                # Snapshot the original expression text.
                 self.original_expr = ast.unparse(node)
-
-                # Perform the mutation: LtE → Lt.
                 node.ops[idx] = ast.Lt()
-
-                # Snapshot the mutated expression text.
                 self.mutated_expr = ast.unparse(node)
-
                 self.mutated = True
                 return node
 
@@ -135,7 +266,7 @@ def mutate_lte_to_lt(source: str) -> Optional[MutationResult]:
     """Parse *source*, mutate the first ``<=`` to ``<``, and return the
     rewritten source code together with expression details.
 
-    Returns ``None`` if no ``<=`` comparison was found.
+    Used by `--demo`. Returns ``None`` if no ``<=`` comparison was found.
     """
     tree = ast.parse(source)
     transformer = _LtEToLt()
