@@ -3,10 +3,14 @@
 Usage
 -----
     ghost haunt --demo
+    ghost haunt --demo --suggest
+    ghost haunt --demo --suggest --model qwen2.5-coder:7b
+    ghost haunt
 
 Copies the bundled demo fixture into a temporary workspace, runs
 baseline tests, applies a single ``<=`` → ``<`` AST mutation, re-runs
-the tests, and reports whether the mutant survived or was killed.
+the tests, reports whether the mutant survived or was killed, and
+optionally requests an unverified AI test suggestion from local Ollama.
 """
 
 from __future__ import annotations
@@ -48,12 +52,23 @@ def _outcome_label(outcome: Outcome) -> str:
 
 # ── Core demo workflow ──────────────────────────────────────────────
 
-def _run_demo() -> int:
+def _run_demo(suggest: bool = False, model: str | None = None) -> int:
     """Execute the full demo mutation-testing workflow.
+
+    Parameters
+    ----------
+    suggest : bool
+        If True, request an unverified AI test suggestion from local Ollama
+        when a mutant survives.
+    model : str, optional
+        Ollama model to use for test suggestions (defaults to 'qwen2.5-coder:7b').
 
     Returns an exit code (0 = success, 1 = error).
     """
-    _banner("👻  Ghost-PR  ·  haunt --demo")
+    title = "👻  Ghost-PR  ·  haunt --demo"
+    if suggest:
+        title += " --suggest"
+    _banner(title)
 
     # 1. Copy demo fixtures into a temporary workspace.
     tmp = tempfile.mkdtemp(prefix="ghost_pr_demo_")
@@ -66,7 +81,8 @@ def _run_demo() -> int:
             shutil.copy2(src_file, tmp_path / src_file.name)
 
         source_file = tmp_path / "bank.py"
-        original_source = source_file.read_text()
+        test_file = tmp_path / "test_bank.py"
+        original_source = source_file.read_text(encoding="utf-8")
 
         # 2. Run baseline tests.
         _banner("Step 1 · Running baseline tests")
@@ -92,7 +108,7 @@ def _run_demo() -> int:
         print(f"  Mutated  : {result.mutated_expr}")
 
         # Write the mutant source into the temp workspace.
-        source_file.write_text(result.mutated_source)
+        source_file.write_text(result.mutated_source, encoding="utf-8")
 
         # 5. Run tests against the mutant.
         _banner("Step 3 · Running tests against the mutant")
@@ -106,7 +122,8 @@ def _run_demo() -> int:
         if mutant.outcome == Outcome.PASSED:
             mutant_status = "SURVIVED"
             print("  🧟  MUTANT SURVIVED — the existing tests did NOT catch the change.")
-            print("       ➜  [Example hint, not AI-generated] Consider adding a boundary test, e.g.  withdraw(100, 100) == 0")
+            if not suggest:
+                print("       ➜  [Example hint, not AI-generated] Consider adding a boundary test, e.g.  withdraw(100, 100) == 0")
         elif mutant.outcome == Outcome.FAILED:
             mutant_status = "KILLED"
             print("  🎯  MUTANT KILLED — the tests caught the mutation.  Nice coverage!")
@@ -119,8 +136,41 @@ def _run_demo() -> int:
         print(f"  Mutated expression  : {result.mutated_expr}")
         print(f"  Mutant status       : {mutant_status}")
 
+        # 8. Local AI test suggestion (Milestone 3A) & Verification (Milestone 3B)
+        if suggest:
+            if mutant_status == "SURVIVED":
+                from ghost_pr.suggest import (
+                    display_suggestion,
+                    extract_function_definition,
+                    request_test_suggestion,
+                )
+                from ghost_pr.verify import run_verification_flow
+
+                original_fn = extract_function_definition(original_source, "withdraw")
+                mutated_fn = extract_function_definition(result.mutated_source, "withdraw")
+                existing_tests = test_file.read_text(encoding="utf-8")
+
+                suggestion = request_test_suggestion(
+                    original_function=original_fn,
+                    mutated_function=mutated_fn,
+                    existing_tests=existing_tests,
+                    import_path="from bank import withdraw",
+                    model=model,
+                )
+                display_suggestion(suggestion)
+
+                # 9. Verification of reviewed test (Milestone 3B)
+                if suggestion.is_success and suggestion.test_code:
+                    run_verification_flow(
+                        test_code=suggestion.test_code,
+                        original_source=original_source,
+                        mutated_source=result.mutated_source,
+                    )
+            else:
+                print("\n  ℹ️   No surviving mutants — test suggestions are only requested when a mutant survives.")
+
     finally:
-        # 8. Clean up — restore nothing in the original, delete temp dir.
+        # Clean up — restore nothing in the original, delete temp dir.
         shutil.rmtree(tmp_path, ignore_errors=True)
         print(f"\n🧹  Cleaned up temporary workspace.\n")
 
@@ -143,6 +193,16 @@ def main(argv: list[str] | None = None) -> None:
         help="Run with the bundled demo fixture (withdraw function)",
     )
     haunt_parser.add_argument(
+        "--suggest",
+        action="store_true",
+        help="Request a local AI test suggestion from Ollama for surviving mutants (demo only)",
+    )
+    haunt_parser.add_argument(
+        "--model",
+        default=None,
+        help="Ollama model to use for AI test suggestions (defaults to 'qwen2.5-coder:7b')",
+    )
+    haunt_parser.add_argument(
         "--repo",
         default=None,
         help="Path to repository root (defaults to searching from current working directory)",
@@ -151,10 +211,21 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command == "haunt":
+        if (args.suggest or args.model) and not args.demo:
+            print("\n❌  AI test suggestions (--suggest) are currently only supported in demo mode (--demo).")
+            print("    Repository-wide AI suggestions are not supported yet.")
+            sys.exit(1)
+
         if args.demo:
-            sys.exit(_run_demo())
+            suggest_enabled = args.suggest or (args.model is not None)
+            sys.exit(_run_demo(suggest=suggest_enabled, model=args.model))
         else:
             sys.exit(haunt_staged_changes(repo_dir=args.repo))
     else:
         parser.print_help()
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+

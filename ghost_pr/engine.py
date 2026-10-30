@@ -38,10 +38,12 @@ class Outcome(Enum):
 @dataclass
 class TestResult:
     """Structured result from a single pytest invocation."""
+    __test__ = False
     outcome: Outcome
     exit_code: Optional[int]
     stdout: str
     stderr: str
+
 
 
 # Mapping of well-known pytest exit codes → Outcome.
@@ -59,6 +61,7 @@ def run_pytest(
     *,
     timeout: int = 30,
     env: dict[str, str] | None = None,
+    extra_args: list[str] | None = None,
 ) -> TestResult:
     """Run ``pytest`` inside *directory* and return a `TestResult`.
 
@@ -76,6 +79,8 @@ def run_pytest(
         Maximum seconds before the subprocess is killed.
     env:
         Optional environment dictionary override.
+    extra_args:
+        Optional additional CLI arguments to pass to pytest.
     """
     run_env = dict(os.environ if env is None else env)
     abs_dir = str(Path(directory).resolve())
@@ -89,9 +94,13 @@ def run_pytest(
     run_env["PYTHONPATH"] = os.pathsep.join(paths)
     run_env["PYTHONDONTWRITEBYTECODE"] = "1"
 
+    cmd = [sys.executable, "-B", "-m", "pytest", "-x", "-q", "--tb=short"]
+    if extra_args:
+        cmd.extend(extra_args)
+
     try:
         proc = subprocess.run(
-            [sys.executable, "-B", "-m", "pytest", "-x", "-q", "--tb=short"],
+            cmd,
             cwd=directory,
             capture_output=True,
             text=True,
