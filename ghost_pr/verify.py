@@ -28,13 +28,20 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from typing import Optional
 
-from ghost_pr.engine import Outcome, TestResult, run_pytest
+from ghost_pr.engine import (
+    MutationCandidate,
+    Outcome,
+    TestResult,
+    apply_mutation_to_source,
+    run_pytest,
+)
 
 
 class VerificationVerdict(Enum):
@@ -94,6 +101,8 @@ def pytest_sessionfinish(session, exitstatus):
     data["session_completed"] = True
     data["exitstatus"] = exitstatus
     try:
+        with open("_ghost_pr_report.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
         with open("report.json", "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception:
@@ -565,21 +574,21 @@ def verify_suggested_test(
             tmp_orig = Path(orig_dir)
             tmp_mut = Path(mut_dir)
 
-            # 1. Setup original copy with bank.py, test_suggested.py, and conftest.py
+            # 1. Setup original copy with bank.py, test_suggested.py, and reporter plugin
             (tmp_orig / "bank.py").write_text(original_source, encoding="utf-8")
             (tmp_orig / "test_suggested.py").write_text(test_code, encoding="utf-8")
-            (tmp_orig / "conftest.py").write_text(_REPORTER_PLUGIN_SOURCE, encoding="utf-8")
+            (tmp_orig / "_ghost_pr_reporter_plugin.py").write_text(_REPORTER_PLUGIN_SOURCE, encoding="utf-8")
 
-            # 2. Setup mutated copy with bank.py, test_suggested.py, and conftest.py
+            # 2. Setup mutated copy with bank.py, test_suggested.py, and reporter plugin
             (tmp_mut / "bank.py").write_text(mutated_source, encoding="utf-8")
             (tmp_mut / "test_suggested.py").write_text(test_code, encoding="utf-8")
-            (tmp_mut / "conftest.py").write_text(_REPORTER_PLUGIN_SOURCE, encoding="utf-8")
+            (tmp_mut / "_ghost_pr_reporter_plugin.py").write_text(_REPORTER_PLUGIN_SOURCE, encoding="utf-8")
 
             # 3. Run pytest explicitly on test_suggested.py in original copy
             orig_test_res = run_pytest(
                 str(tmp_orig),
                 timeout=timeout,
-                extra_args=["test_suggested.py"],
+                extra_args=["-p", "_ghost_pr_reporter_plugin", "test_suggested.py"],
             )
             orig_detail = parse_run_report(tmp_orig / "report.json", orig_test_res)
 
@@ -587,7 +596,7 @@ def verify_suggested_test(
             mut_test_res = run_pytest(
                 str(tmp_mut),
                 timeout=timeout,
-                extra_args=["test_suggested.py"],
+                extra_args=["-p", "_ghost_pr_reporter_plugin", "test_suggested.py"],
             )
             mut_detail = parse_run_report(tmp_mut / "report.json", mut_test_res)
 
@@ -643,6 +652,149 @@ def run_verification_flow(
         test_code=test_code,
         original_source=original_source,
         mutated_source=mutated_source,
+        timeout=timeout,
+    )
+    display_verification_result(result)
+    return result
+
+
+def _find_unique_test_path(workspace: Path) -> tuple[Path, str]:
+    """Find an isolated target directory and unique test filename in workspace.
+
+    If 'tests' directory exists, places test inside 'tests'.
+    Else if 'test' directory exists, places test inside 'test'.
+    Otherwise, places test in workspace root.
+
+    Returns (full_path_in_workspace, relative_path_str).
+    """
+    if (workspace / "tests").is_dir():
+        rel_dir = Path("tests")
+    elif (workspace / "test").is_dir():
+        rel_dir = Path("test")
+    else:
+        rel_dir = Path(".")
+
+    base = "test_ghost_pr_suggested.py"
+    target_path = workspace / rel_dir / base
+    if not target_path.exists():
+        return target_path, str((rel_dir / base).as_posix())
+
+    idx = 1
+    while (workspace / rel_dir / f"test_ghost_pr_suggested_{idx}.py").exists():
+        idx += 1
+    cand = f"test_ghost_pr_suggested_{idx}.py"
+    return workspace / rel_dir / cand, str((rel_dir / cand).as_posix())
+
+
+def _find_unique_plugin_module(workspace: Path) -> tuple[str, str]:
+    """Find a unique module name for the reporter plugin in workspace.
+
+    Returns (module_name, filename).
+    """
+    base = "_ghost_pr_reporter_plugin"
+    if not (workspace / f"{base}.py").exists():
+        return base, f"{base}.py"
+
+    idx = 1
+    while (workspace / f"{base}_{idx}.py").exists():
+        idx += 1
+    return f"{base}_{idx}", f"{base}_{idx}.py"
+
+
+def verify_staged_test(
+    pristine_snapshot: Path,
+    candidate: MutationCandidate,
+    test_code: str,
+    *,
+    timeout: int = 30,
+) -> VerificationResult:
+    """Run the exact suggested test against pristine and mutated staged snapshots.
+
+    Creates two isolated temporary copies of the full staged snapshot, including
+    project configuration, dependencies, and conftest fixtures. Never overwrites
+    existing conftest.py files or project test files.
+    """
+    with tempfile.TemporaryDirectory(prefix="ghost_pr_staged_orig_") as orig_dir:
+        with tempfile.TemporaryDirectory(prefix="ghost_pr_staged_mut_") as mut_dir:
+            tmp_orig = Path(orig_dir)
+            tmp_mut = Path(mut_dir)
+
+            # 1. Copy pristine snapshot into both directories
+            shutil.copytree(
+                pristine_snapshot,
+                tmp_orig,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".pytest_cache"),
+            )
+            shutil.copytree(
+                pristine_snapshot,
+                tmp_mut,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".pytest_cache"),
+            )
+
+            # 2. Mutate exactly the selected candidate in tmp_mut
+            mut_target_path = tmp_mut / candidate.file_path
+            orig_content = (tmp_orig / candidate.file_path).read_text(encoding="utf-8")
+            mutated_content = apply_mutation_to_source(orig_content, candidate)
+            mut_target_path.write_text(mutated_content, encoding="utf-8")
+
+            # 3. Find unique test filename to never overwrite existing test files
+            orig_test_path, rel_test_path = _find_unique_test_path(tmp_orig)
+            mut_test_path = tmp_mut / rel_test_path
+
+            orig_test_path.write_text(test_code, encoding="utf-8")
+            mut_test_path.write_text(test_code, encoding="utf-8")
+
+            # 4. Injected reporter plugin with a unique name to never overwrite conftest.py
+            plugin_mod, plugin_file = _find_unique_plugin_module(tmp_orig)
+            (tmp_orig / plugin_file).write_text(_REPORTER_PLUGIN_SOURCE, encoding="utf-8")
+            (tmp_mut / plugin_file).write_text(_REPORTER_PLUGIN_SOURCE, encoding="utf-8")
+
+            # 5. Run pytest explicitly on the suggested test file
+            orig_test_res = run_pytest(
+                str(tmp_orig),
+                timeout=timeout,
+                extra_args=["-p", plugin_mod, rel_test_path],
+            )
+            orig_detail = parse_run_report(tmp_orig / "_ghost_pr_report.json", orig_test_res)
+
+            mut_test_res = run_pytest(
+                str(tmp_mut),
+                timeout=timeout,
+                extra_args=["-p", plugin_mod, rel_test_path],
+            )
+            mut_detail = parse_run_report(tmp_mut / "_ghost_pr_report.json", mut_test_res)
+
+            # 6. Determine verdict from structured reports
+            verdict, reason = _determine_verdict(orig_detail, mut_detail, timeout)
+
+            return VerificationResult(
+                verdict=verdict,
+                orig_detail=orig_detail,
+                mut_detail=mut_detail,
+                reason=reason,
+            )
+
+
+def run_staged_verification_flow(
+    pristine_snapshot: Path,
+    candidate: MutationCandidate,
+    test_code: str,
+    *,
+    ask_consent: bool = True,
+    timeout: int = 30,
+) -> Optional[VerificationResult]:
+    """Coordinate the interactive verification workflow for staged changes."""
+    if ask_consent:
+        consent = prompt_verification_consent()
+        if not consent:
+            return None
+
+    result = verify_staged_test(
+        pristine_snapshot=pristine_snapshot,
+        candidate=candidate,
+        test_code=test_code,
         timeout=timeout,
     )
     display_verification_result(result)

@@ -465,14 +465,14 @@ def test_cli_demo_suggest_ollama_down_preserves_mutation_results(capsys):
     assert "Mutation testing results above were not affected" in out
 
 
-def test_cli_suggest_without_demo_rejected(capsys):
-    """'ghost haunt --suggest' without --demo must exit with code 1 and helpful message."""
+def test_cli_suggest_without_demo_supported_dispatches_to_staged(tmp_path, capsys):
+    """'ghost haunt --suggest' without --demo now dispatches to staged changes flow."""
     with pytest.raises(SystemExit) as exc:
-        main(["haunt", "--suggest"])
+        main(["haunt", "--suggest", "--repo", str(tmp_path)])
     assert exc.value.code == 1
 
     out = capsys.readouterr().out
-    assert "only supported in demo mode (--demo)" in out
+    assert "Not inside a Git repository" in out
 
 
 def test_generated_code_never_executed():

@@ -65,12 +65,19 @@ class MutantRunResult:
     detail: str = ""
 
 
-def haunt_staged_changes(repo_dir: Path | str | None = None) -> int:
+def haunt_staged_changes(
+    repo_dir: Path | str | None = None,
+    suggest: bool = False,
+    model: str | None = None,
+) -> int:
     """Run mutation testing on staged Python changes in a Git repository.
 
     Returns exit code 0 on successful execution or clean skip, 1 on errors or failures.
     """
-    _banner("👻  Ghost-PR  ·  haunt (staged changes)")
+    title = "👻  Ghost-PR  ·  haunt (staged changes)"
+    if suggest:
+        title += " --suggest"
+    _banner(title)
 
     # 1. Find the current Git repository root
     repo_root = find_repo_root(repo_dir)
@@ -178,6 +185,7 @@ def haunt_staged_changes(repo_dir: Path | str | None = None) -> int:
             print(f"\nℹ️   Running {len(candidates_to_run)} mutant(s).")
 
         results: list[MutantRunResult] = []
+        candidate_and_results: list[tuple[MutationCandidate, MutantRunResult]] = []
 
         for idx, candidate in enumerate(candidates_to_run, start=1):
             _banner(
@@ -221,16 +229,16 @@ def haunt_staged_changes(repo_dir: Path | str | None = None) -> int:
                     detail = f"Tests failed to run cleanly: {mutant_run.outcome.name}"
                     print(f"  ⚠️   INCONCLUSIVE — {detail}")
 
-                results.append(
-                    MutantRunResult(
-                        file_path=candidate.file_path,
-                        lineno=candidate.lineno,
-                        original_expr=candidate.original_expr,
-                        mutated_expr=candidate.mutated_expr,
-                        status=status,
-                        detail=detail,
-                    )
+                run_res = MutantRunResult(
+                    file_path=candidate.file_path,
+                    lineno=candidate.lineno,
+                    original_expr=candidate.original_expr,
+                    mutated_expr=candidate.mutated_expr,
+                    status=status,
+                    detail=detail,
                 )
+                results.append(run_res)
+                candidate_and_results.append((candidate, run_res))
             finally:
                 shutil.rmtree(mutant_path, ignore_errors=True)
 
@@ -243,6 +251,108 @@ def haunt_staged_changes(repo_dir: Path | str | None = None) -> int:
             print(f"      Mutated  : {res.mutated_expr}")
             if res.detail:
                 print(f"      Detail   : {res.detail}")
+
+        # 11. AI Test Suggestion & Verification for Staged Changes (Milestone 4)
+        if suggest:
+            surviving = [
+                (cand, r) for cand, r in candidate_and_results if r.status == "SURVIVED"
+            ]
+            if not surviving:
+                print(
+                    "\nℹ️   No surviving mutants in staged changes — "
+                    "test suggestions are only requested when a mutant survives."
+                )
+            else:
+                from ghost_pr.suggest import (
+                    analyze_mutation_target,
+                    display_suggestion,
+                    extract_failure_diagnostics,
+                    request_revised_test_suggestion,
+                    request_test_suggestion,
+                )
+                from ghost_pr.verify import (
+                    VerificationVerdict,
+                    run_staged_verification_flow,
+                )
+
+                selected_pair = None
+                selected_target_info = None
+                unsupported_reasons: list[tuple[MutationCandidate, str]] = []
+
+                for cand, r in surviving:
+                    is_supported, target_info, reason = analyze_mutation_target(
+                        snapshot_dir=pristine_snapshot,
+                        candidate=cand,
+                    )
+                    if is_supported and target_info is not None:
+                        selected_pair = (cand, r)
+                        selected_target_info = target_info
+                        break
+                    else:
+                        unsupported_reasons.append((cand, reason))
+
+                if selected_pair is None:
+                    _banner("💡  AI Test Suggestion [SKIPPED]")
+                    print("  ℹ️   No supported surviving mutants found for AI test suggestions.")
+                    for cand, reason in unsupported_reasons:
+                        print(f"      • {cand.file_path}:{cand.lineno}: {reason}")
+                    print()
+                else:
+                    cand, res = selected_pair
+                    target_info = selected_target_info
+                    _banner(f"💡  AI Test Suggestion for {cand.file_path}:{cand.lineno}")
+
+                    suggestion = request_test_suggestion(
+                        original_function=target_info.original_func,
+                        mutated_function=target_info.mutated_func,
+                        existing_tests=target_info.existing_tests,
+                        import_path=target_info.import_path,
+                        model=model,
+                    )
+                    display_suggestion(suggestion)
+
+                    # Prompt interactive consent and run verification if accepted
+                    if suggestion.is_success and suggestion.test_code:
+                        v_result = run_staged_verification_flow(
+                            pristine_snapshot=pristine_snapshot,
+                            candidate=cand,
+                            test_code=suggestion.test_code,
+                        )
+
+                        # At most ONE feedback-based retry if REJECTED or NON-DISTINGUISHING
+                        if (
+                            v_result is not None
+                            and v_result.verdict in (
+                                VerificationVerdict.REJECTED,
+                                VerificationVerdict.NON_DISTINGUISHING,
+                            )
+                        ):
+                            print(
+                                f"\n🔄  Initial suggested test was {v_result.verdict.name}. "
+                                "Requesting 1 feedback-based revision from Ollama..."
+                            )
+                            diagnostics = extract_failure_diagnostics(
+                                verdict=v_result.verdict.name,
+                                orig_detail=v_result.orig_detail,
+                                mut_detail=v_result.mut_detail,
+                            )
+                            revised = request_revised_test_suggestion(
+                                original_function=target_info.original_func,
+                                mutated_function=target_info.mutated_func,
+                                previous_test=suggestion.test_code,
+                                verdict=v_result.verdict.name,
+                                diagnostics=diagnostics,
+                                import_path=target_info.import_path,
+                                model=model,
+                            )
+                            display_suggestion(revised, is_retry=True)
+
+                            if revised.is_success and revised.test_code:
+                                run_staged_verification_flow(
+                                    pristine_snapshot=pristine_snapshot,
+                                    candidate=cand,
+                                    test_code=revised.test_code,
+                                )
 
     finally:
         # Preserve working files and Git index: cleanup temp directory

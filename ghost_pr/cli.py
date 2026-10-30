@@ -144,7 +144,10 @@ def _run_demo(suggest: bool = False, model: str | None = None) -> int:
                     extract_function_definition,
                     request_test_suggestion,
                 )
-                from ghost_pr.verify import run_verification_flow
+                from ghost_pr.verify import (
+                    VerificationVerdict,
+                    run_verification_flow,
+                )
 
                 original_fn = extract_function_definition(original_source, "withdraw")
                 mutated_fn = extract_function_definition(result.mutated_source, "withdraw")
@@ -161,11 +164,51 @@ def _run_demo(suggest: bool = False, model: str | None = None) -> int:
 
                 # 9. Verification of reviewed test (Milestone 3B)
                 if suggestion.is_success and suggestion.test_code:
-                    run_verification_flow(
+                    v_result = run_verification_flow(
                         test_code=suggestion.test_code,
                         original_source=original_source,
                         mutated_source=result.mutated_source,
                     )
+
+                    # At most ONE feedback-based retry if REJECTED or NON-DISTINGUISHING
+                    if (
+                        v_result is not None
+                        and v_result.verdict in (
+                            VerificationVerdict.REJECTED,
+                            VerificationVerdict.NON_DISTINGUISHING,
+                        )
+                    ):
+                        from ghost_pr.suggest import (
+                            extract_failure_diagnostics,
+                            request_revised_test_suggestion,
+                        )
+
+                        print(
+                            f"\n🔄  Initial suggested test was {v_result.verdict.name}. "
+                            "Requesting 1 feedback-based revision from Ollama..."
+                        )
+                        diagnostics = extract_failure_diagnostics(
+                            verdict=v_result.verdict.name,
+                            orig_detail=v_result.orig_detail,
+                            mut_detail=v_result.mut_detail,
+                        )
+                        revised = request_revised_test_suggestion(
+                            original_function=original_fn,
+                            mutated_function=mutated_fn,
+                            previous_test=suggestion.test_code,
+                            verdict=v_result.verdict.name,
+                            diagnostics=diagnostics,
+                            import_path="from bank import withdraw",
+                            model=model,
+                        )
+                        display_suggestion(revised, is_retry=True)
+
+                        if revised.is_success and revised.test_code:
+                            run_verification_flow(
+                                test_code=revised.test_code,
+                                original_source=original_source,
+                                mutated_source=result.mutated_source,
+                            )
             else:
                 print("\n  ℹ️   No surviving mutants — test suggestions are only requested when a mutant survives.")
 
@@ -195,7 +238,7 @@ def main(argv: list[str] | None = None) -> None:
     haunt_parser.add_argument(
         "--suggest",
         action="store_true",
-        help="Request a local AI test suggestion from Ollama for surviving mutants (demo only)",
+        help="Request a local AI test suggestion from Ollama for surviving mutants",
     )
     haunt_parser.add_argument(
         "--model",
@@ -211,16 +254,17 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command == "haunt":
-        if (args.suggest or args.model) and not args.demo:
-            print("\n❌  AI test suggestions (--suggest) are currently only supported in demo mode (--demo).")
-            print("    Repository-wide AI suggestions are not supported yet.")
-            sys.exit(1)
-
+        suggest_enabled = args.suggest or (args.model is not None)
         if args.demo:
-            suggest_enabled = args.suggest or (args.model is not None)
             sys.exit(_run_demo(suggest=suggest_enabled, model=args.model))
         else:
-            sys.exit(haunt_staged_changes(repo_dir=args.repo))
+            sys.exit(
+                haunt_staged_changes(
+                    repo_dir=args.repo,
+                    suggest=suggest_enabled,
+                    model=args.model,
+                )
+            )
     else:
         parser.print_help()
         sys.exit(1)
