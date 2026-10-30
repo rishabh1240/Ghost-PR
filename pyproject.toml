@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ghost-pr"
+version = "0.1.0"
+description = "Mutation testing CLI that finds gaps in your test suite"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = ["pytest>=7.0"]
+
+[project.scripts]
+ghost = "ghost_pr.cli:main"

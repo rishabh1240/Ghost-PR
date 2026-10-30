@@ -1,0 +1,17 @@
+# Virtual environment
+.venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Pytest
+.pytest_cache/
+
+# Build / packaging
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
