@@ -2,15 +2,11 @@
 
 Usage
 -----
-    ghost haunt --demo
-    ghost haunt --demo --suggest
-    ghost haunt --demo --suggest --model qwen2.5-coder:7b
-    ghost haunt
-
-Copies the bundled demo fixture into a temporary workspace, runs
-baseline tests, applies a single ``<=`` → ``<`` AST mutation, re-runs
-the tests, reports whether the mutant survived or was killed, and
-optionally requests an unverified AI test suggestion from local Ollama.
+    ghost haunt                                    # Run demo with AI suggestions & auto-verification (default)
+    ghost haunt --demo                             # Explicit demo run
+    ghost haunt --staged                           # Analyze staged Git changes in repository
+    ghost haunt --staged --suggest --yes           # Staged changes with AI suggestions & auto-verification
+    ghost staged                                   # Alternative command for staged Git changes
 """
 
 from __future__ import annotations
@@ -242,16 +238,34 @@ def main(argv: list[str] | None = None) -> None:
     )
     sub = parser.add_subparsers(dest="command")
 
-    haunt_parser = sub.add_parser("haunt", help="Run mutation testing")
+    haunt_parser = sub.add_parser(
+        "haunt",
+        help="Run mutation testing (runs demo with AI suggestions & auto-verification by default)",
+        description=(
+            "Run mutation testing. By default, runs the bundled demo with local AI suggestions "
+            "and automatic verification (equivalent to 'ghost haunt --demo --suggest --yes'). "
+            "Use --staged to analyze staged Git changes in your repository."
+        ),
+    )
     haunt_parser.add_argument(
         "--demo",
         action="store_true",
-        help="Run with the bundled demo fixture (withdraw function)",
+        help="Run with the bundled demo fixture (default behavior of 'ghost haunt')",
+    )
+    haunt_parser.add_argument(
+        "--staged",
+        action="store_true",
+        help="Analyze staged Git changes in your repository instead of running the demo",
     )
     haunt_parser.add_argument(
         "--suggest",
         action="store_true",
         help="Request a local AI test suggestion from Ollama for surviving mutants",
+    )
+    haunt_parser.add_argument(
+        "--no-suggest",
+        action="store_true",
+        help="Disable AI test suggestions and run mutation testing only",
     )
     haunt_parser.add_argument(
         "--model",
@@ -262,9 +276,36 @@ def main(argv: list[str] | None = None) -> None:
         "--yes",
         "-y",
         action="store_true",
-        help="Automatically accept verification without interactive confirmation (requires --suggest)",
+        help="Automatically accept verification without interactive confirmation",
     )
     haunt_parser.add_argument(
+        "--repo",
+        default=None,
+        help="Path to repository root for staged analysis (defaults to searching from current working directory)",
+    )
+
+    staged_parser = sub.add_parser(
+        "staged",
+        help="Analyze staged Git changes in your repository",
+        description="Analyze staged Git changes in your repository for mutation testing gaps.",
+    )
+    staged_parser.add_argument(
+        "--suggest",
+        action="store_true",
+        help="Request a local AI test suggestion from Ollama for surviving mutants",
+    )
+    staged_parser.add_argument(
+        "--model",
+        default=None,
+        help="Ollama model to use for AI test suggestions (defaults to 'qwen2.5-coder:7b')",
+    )
+    staged_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Automatically accept verification without interactive confirmation (requires --suggest)",
+    )
+    staged_parser.add_argument(
         "--repo",
         default=None,
         help="Path to repository root (defaults to searching from current working directory)",
@@ -273,15 +314,14 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command == "haunt":
-        if args.yes and not args.suggest:
-            print("\n❌  Usage error: --yes requires --suggest.")
-            print("    Run 'ghost haunt --suggest --yes' or 'ghost haunt --demo --suggest --yes'.\n")
-            sys.exit(1)
+        is_staged = args.staged or (args.repo is not None)
+        if is_staged:
+            if args.yes and not args.suggest:
+                print("\n❌  Usage error: --yes requires --suggest.")
+                print("    Run 'ghost haunt --staged --suggest --yes' or 'ghost staged --suggest --yes'.\n")
+                sys.exit(1)
 
-        suggest_enabled = args.suggest or (args.model is not None)
-        if args.demo:
-            sys.exit(_run_demo(suggest=suggest_enabled, model=args.model, yes=args.yes))
-        else:
+            suggest_enabled = args.suggest or (args.model is not None)
             sys.exit(
                 haunt_staged_changes(
                     repo_dir=args.repo,
@@ -290,6 +330,44 @@ def main(argv: list[str] | None = None) -> None:
                     yes=args.yes,
                 )
             )
+        else:
+            # Demo mode: default for 'ghost haunt'
+            # By default: equivalent to 'ghost haunt --demo --suggest --yes'
+            if args.no_suggest:
+                suggest_enabled = False
+                yes_enabled = False
+            elif args.suggest and not args.yes:
+                # Explicitly requested suggestions with interactive confirmation
+                suggest_enabled = True
+                yes_enabled = False
+            else:
+                # Default: AI suggestions and automatic verification enabled
+                suggest_enabled = True
+                yes_enabled = True
+
+            sys.exit(
+                _run_demo(
+                    suggest=suggest_enabled,
+                    model=args.model,
+                    yes=yes_enabled,
+                )
+            )
+
+    elif args.command == "staged":
+        if args.yes and not args.suggest:
+            print("\n❌  Usage error: --yes requires --suggest.")
+            print("    Run 'ghost staged --suggest --yes'.\n")
+            sys.exit(1)
+
+        suggest_enabled = args.suggest or (args.model is not None)
+        sys.exit(
+            haunt_staged_changes(
+                repo_dir=args.repo,
+                suggest=suggest_enabled,
+                model=args.model,
+                yes=args.yes,
+            )
+        )
     else:
         parser.print_help()
         sys.exit(1)

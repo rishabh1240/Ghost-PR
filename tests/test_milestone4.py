@@ -822,20 +822,70 @@ def test_retry_limit_hard_ceiling_enforced(tmp_path: Path, monkeypatch, capsys):
 # ── 17. --yes Non-Interactive Verification Tests ─────────────────────
 
 def test_cli_yes_without_suggest_rejected(capsys):
-    """'ghost haunt --yes' without --suggest must exit 1 with clear usage error."""
+    """'--yes' without --suggest in staged mode must exit 1 with clear usage error."""
     with pytest.raises(SystemExit) as exc1:
-        main(["haunt", "--yes"])
+        main(["haunt", "--staged", "--yes"])
     assert exc1.value.code == 1
 
     out1 = capsys.readouterr().out
     assert "Usage error: --yes requires --suggest" in out1
 
     with pytest.raises(SystemExit) as exc2:
-        main(["haunt", "--demo", "--yes"])
+        main(["staged", "--yes"])
     assert exc2.value.code == 1
 
     out2 = capsys.readouterr().out
     assert "Usage error: --yes requires --suggest" in out2
+
+
+def test_cli_haunt_default_runs_demo_suggest_yes(monkeypatch, capsys):
+    """'ghost haunt' (with no flags) runs demo with suggest and auto-verification by default."""
+    suggested_test = (
+        "from bank import withdraw\n\n"
+        "def test_withdraw_boundary():\n"
+        "    assert withdraw(100, 100) == 0\n"
+    )
+    mock_resp = _make_mock_ollama_response(suggested_test)
+
+    input_mock = MagicMock(side_effect=AssertionError("input() must not be called in default ghost haunt"))
+    monkeypatch.setattr("builtins.input", input_mock)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        with pytest.raises(SystemExit) as exc:
+            main(["haunt"])
+        assert exc.value.code == 0
+
+    assert input_mock.call_count == 0
+
+    out = capsys.readouterr().out
+    assert "haunt --demo --suggest --yes" in out
+    assert "AI-Suggested Test" in out
+    assert "NOTICE (--yes): Automatic verification executes generated Python code" in out
+    assert "Original passes + mutant fails: VERIFIED for this mutation." in out
+
+
+def test_cli_staged_option_and_command(tmp_path: Path, capsys):
+    """'ghost haunt --staged' and 'ghost staged' analyze staged changes."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+
+    (repo / "calc.py").write_text("def is_ten(x):\n    return x <= 10\n", encoding="utf-8")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_calc.py").write_text("from calc import is_ten\ndef test_t():\n    assert is_ten(5)\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+
+    with pytest.raises(SystemExit) as exc1:
+        main(["haunt", "--staged", "--repo", str(repo)])
+    assert exc1.value.code == 0
+    out1 = capsys.readouterr().out
+    assert "Step 1 · Running baseline tests on staged snapshot" in out1
+
+    with pytest.raises(SystemExit) as exc2:
+        main(["staged", "--repo", str(repo)])
+    assert exc2.value.code == 0
+    out2 = capsys.readouterr().out
+    assert "Step 1 · Running baseline tests on staged snapshot" in out2
 
 
 def test_cli_demo_suggest_yes_never_calls_input(monkeypatch, capsys):
