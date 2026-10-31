@@ -414,7 +414,7 @@ def test_prompt_consent_default_no_on_enter(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda _: "")
     assert prompt_verification_consent() is False
     out = capsys.readouterr().out
-    assert "Declined test verification" in out
+    assert "Verification skipped." in out
 
 
 def test_prompt_consent_explicit_no(monkeypatch, capsys):
@@ -422,7 +422,7 @@ def test_prompt_consent_explicit_no(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda _: "n")
     assert prompt_verification_consent() is False
     out = capsys.readouterr().out
-    assert "Declined test verification" in out
+    assert "Verification skipped." in out
 
 
 def test_prompt_consent_eof_declines_cleanly(monkeypatch, capsys):
@@ -433,7 +433,7 @@ def test_prompt_consent_eof_declines_cleanly(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", raise_eof)
     assert prompt_verification_consent() is False
     out = capsys.readouterr().out
-    assert "Declined test verification" in out
+    assert "Verification skipped." in out
 
 
 def test_declining_executes_no_generated_code(monkeypatch):
@@ -508,8 +508,9 @@ def test_cli_demo_suggest_with_verification_accepted(monkeypatch, capsys):
     assert "Step 2 · Applying AST mutation" in out
     assert "Step 3 · Running tests against the mutant" in out
     assert "MUTANT SURVIVED" in out
-    assert "AI Test Suggestion [UNVERIFIED]" in out
+    assert "AI-Suggested Test" in out
     assert "SECURITY NOTICE:" in out
+    assert "Checking this test against original and mutated code…" in out
     assert "Test Verification Result" in out
     assert "Original passes + mutant fails: VERIFIED for this mutation." in out
     assert "Cleaned up temporary workspace." in out
@@ -531,7 +532,9 @@ def test_cli_demo_suggest_with_verification_declined(monkeypatch, capsys):
         assert exc.value.code == 0
 
     out = capsys.readouterr().out
-    assert "AI Test Suggestion [UNVERIFIED]" in out
+    assert "AI-Suggested Test" in out
+    assert "This test has not been added to your project." in out
+    assert "Not yet executed." in out
     assert "SECURITY NOTICE:" in out
-    assert "Declined test verification — suggested test was not executed." in out
+    assert "Verification skipped." in out
     assert "Test Verification Result" not in out

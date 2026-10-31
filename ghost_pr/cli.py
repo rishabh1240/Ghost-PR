@@ -52,7 +52,11 @@ def _outcome_label(outcome: Outcome) -> str:
 
 # ── Core demo workflow ──────────────────────────────────────────────
 
-def _run_demo(suggest: bool = False, model: str | None = None) -> int:
+def _run_demo(
+    suggest: bool = False,
+    model: str | None = None,
+    yes: bool = False,
+) -> int:
     """Execute the full demo mutation-testing workflow.
 
     Parameters
@@ -62,12 +66,19 @@ def _run_demo(suggest: bool = False, model: str | None = None) -> int:
         when a mutant survives.
     model : str, optional
         Ollama model to use for test suggestions (defaults to 'qwen2.5-coder:7b').
+    yes : bool, optional
+        If True, automatically accept verification without interactive confirmation.
 
     Returns an exit code (0 = success, 1 = error).
     """
+    from ghost_pr.verify import reset_auto_yes_notice
+    reset_auto_yes_notice()
+
     title = "👻  Ghost-PR  ·  haunt --demo"
     if suggest:
         title += " --suggest"
+    if yes:
+        title += " --yes"
     _banner(title)
 
     # 1. Copy demo fixtures into a temporary workspace.
@@ -160,7 +171,7 @@ def _run_demo(suggest: bool = False, model: str | None = None) -> int:
                     import_path="from bank import withdraw",
                     model=model,
                 )
-                display_suggestion(suggestion)
+                display_suggestion(suggestion, auto_yes=yes)
 
                 # 9. Verification of reviewed test (Milestone 3B)
                 if suggestion.is_success and suggestion.test_code:
@@ -168,6 +179,7 @@ def _run_demo(suggest: bool = False, model: str | None = None) -> int:
                         test_code=suggestion.test_code,
                         original_source=original_source,
                         mutated_source=result.mutated_source,
+                        auto_yes=yes,
                     )
 
                     # At most ONE feedback-based retry if REJECTED or NON-DISTINGUISHING
@@ -201,13 +213,14 @@ def _run_demo(suggest: bool = False, model: str | None = None) -> int:
                             import_path="from bank import withdraw",
                             model=model,
                         )
-                        display_suggestion(revised, is_retry=True)
+                        display_suggestion(revised, is_retry=True, auto_yes=yes)
 
                         if revised.is_success and revised.test_code:
                             run_verification_flow(
                                 test_code=revised.test_code,
                                 original_source=original_source,
                                 mutated_source=result.mutated_source,
+                                auto_yes=yes,
                             )
             else:
                 print("\n  ℹ️   No surviving mutants — test suggestions are only requested when a mutant survives.")
@@ -246,6 +259,12 @@ def main(argv: list[str] | None = None) -> None:
         help="Ollama model to use for AI test suggestions (defaults to 'qwen2.5-coder:7b')",
     )
     haunt_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Automatically accept verification without interactive confirmation (requires --suggest)",
+    )
+    haunt_parser.add_argument(
         "--repo",
         default=None,
         help="Path to repository root (defaults to searching from current working directory)",
@@ -254,15 +273,21 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command == "haunt":
+        if args.yes and not args.suggest:
+            print("\n❌  Usage error: --yes requires --suggest.")
+            print("    Run 'ghost haunt --suggest --yes' or 'ghost haunt --demo --suggest --yes'.\n")
+            sys.exit(1)
+
         suggest_enabled = args.suggest or (args.model is not None)
         if args.demo:
-            sys.exit(_run_demo(suggest=suggest_enabled, model=args.model))
+            sys.exit(_run_demo(suggest=suggest_enabled, model=args.model, yes=args.yes))
         else:
             sys.exit(
                 haunt_staged_changes(
                     repo_dir=args.repo,
                     suggest=suggest_enabled,
                     model=args.model,
+                    yes=args.yes,
                 )
             )
     else:

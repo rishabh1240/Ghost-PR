@@ -767,22 +767,26 @@ def request_revised_test_suggestion(
     )
 
 
-def display_suggestion(result: SuggestionResult, *, is_retry: bool = False) -> None:
-    """Print the AI suggestion with mandatory UNVERIFIED label and disclaimer.
+def display_suggestion(
+    result: SuggestionResult,
+    *,
+    is_retry: bool = False,
+    auto_yes: bool = False,
+) -> None:
+    """Print the AI-suggested test for user review.
 
     Generated code is displayed for review only and is never automatically
-    executed or written to disk.
+    added to the project files.
     """
     banner_title = (
-        "  💡  AI Test Suggestion (Revised / Retry) [UNVERIFIED]"
+        "  💡  AI-Suggested Test (Revised)"
         if is_retry
-        else "  💡  AI Test Suggestion [UNVERIFIED]"
+        else "  💡  AI-Suggested Test"
     )
     print(f"\n{'─' * 60}")
     print(banner_title)
     print(f"{'─' * 60}")
     print(f"  Model  : {result.model}")
-    print("  Status : UNVERIFIED (Generation alone is not verification)")
 
     if result.error:
         print(f"\n  ⚠️   Could not generate AI test suggestion:")
@@ -790,16 +794,16 @@ def display_suggestion(result: SuggestionResult, *, is_retry: bool = False) -> N
         print("      (Mutation testing results above were not affected)\n")
         return
 
-    print("\n  Review the suggested test below before adding it to your test suite:")
-    print("  (This test has NOT been executed or added to your project files)\n")
+    print("\n  This test has not been added to your project.")
+    if auto_yes:
+        print("  Checking this test against original and mutated code…\n")
+    else:
+        print("  Not yet executed.\n")
+
     lines = (result.test_code or "").splitlines()
     max_len = max([len(line) for line in lines] + [56])
     border = "─" * (max_len + 4)
     print(f"  ┌{border}┐")
     for line in lines:
         print(f"  │  {line:<{max_len}}  │")
-    print(f"  └{border}┘")
-    print("\n  ⚠️   DISCLAIMER: This test is UNVERIFIED.")
-    print("      AI-generated tests can be inaccurate, incomplete, or flawed.")
-    print("      Inspect inputs, boundary values, and assertions carefully")
-    print("      before adopting any suggested code.\n")
+    print(f"  └{border}┘\n")

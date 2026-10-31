@@ -102,7 +102,7 @@ def test_staged_suggest_correct_suggestion_verifies(tmp_path: Path, monkeypatch,
     out = capsys.readouterr().out
     assert "MUTANT SURVIVED" in out
     assert "AI Test Suggestion for discount.py:2" in out
-    assert "AI Test Suggestion [UNVERIFIED]" in out
+    assert "AI-Suggested Test" in out
     assert "SECURITY NOTICE:" in out
     assert "Original passes + mutant fails: VERIFIED for this mutation." in out
 
@@ -235,9 +235,9 @@ def test_staged_suggest_declining_consent_executes_no_generated_test(tmp_path: P
         assert code == 0
 
     out = capsys.readouterr().out
-    assert "AI Test Suggestion [UNVERIFIED]" in out
+    assert "AI-Suggested Test" in out
     assert "SECURITY NOTICE:" in out
-    assert "Declined test verification — suggested test was not executed." in out
+    assert "Verification skipped." in out
     assert "Test Verification Result" not in out
     assert not side_effect_marker.exists()
 
@@ -657,7 +657,7 @@ def test_retry_successful_recovery(tmp_path: Path, monkeypatch, capsys):
     assert "Original fails: REJECTED; incompatible with original behaviour." in out
     # Retry notice and revised generation
     assert "Initial suggested test was REJECTED. Requesting 1 feedback-based revision" in out
-    assert "AI Test Suggestion (Revised / Retry) [UNVERIFIED]" in out
+    assert "AI-Suggested Test (Revised)" in out
     # Second attempt succeeded and was verified
     assert "Original passes + mutant fails: VERIFIED for this mutation." in out
 
@@ -770,7 +770,7 @@ def test_retry_declining_revised_test_executes_no_code(tmp_path: Path, monkeypat
     out = capsys.readouterr().out
     assert "Both pass: NON-DISTINGUISHING; mutation still survives." in out
     assert "Initial suggested test was NON_DISTINGUISHING. Requesting 1 feedback-based revision" in out
-    assert "Declined test verification — suggested test was not executed." in out
+    assert "Verification skipped." in out
     assert not marker.exists()
 
 
@@ -817,3 +817,144 @@ def test_retry_limit_hard_ceiling_enforced(tmp_path: Path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Original passes + mutant fails: VERIFIED for this mutation." in out
     assert "Requesting 1 feedback-based revision" not in out
+
+
+# ── 17. --yes Non-Interactive Verification Tests ─────────────────────
+
+def test_cli_yes_without_suggest_rejected(capsys):
+    """'ghost haunt --yes' without --suggest must exit 1 with clear usage error."""
+    with pytest.raises(SystemExit) as exc1:
+        main(["haunt", "--yes"])
+    assert exc1.value.code == 1
+
+    out1 = capsys.readouterr().out
+    assert "Usage error: --yes requires --suggest" in out1
+
+    with pytest.raises(SystemExit) as exc2:
+        main(["haunt", "--demo", "--yes"])
+    assert exc2.value.code == 1
+
+    out2 = capsys.readouterr().out
+    assert "Usage error: --yes requires --suggest" in out2
+
+
+def test_cli_demo_suggest_yes_never_calls_input(monkeypatch, capsys):
+    """'ghost haunt --demo --suggest --yes' verifies without calling input()."""
+    suggested_test = (
+        "from bank import withdraw\n\n"
+        "def test_withdraw_boundary():\n"
+        "    assert withdraw(100, 100) == 0\n"
+    )
+    mock_resp = _make_mock_ollama_response(suggested_test)
+
+    # If input() is called, raise an error to fail the test immediately
+    input_mock = MagicMock(side_effect=AssertionError("input() must not be called when --yes is supplied"))
+    monkeypatch.setattr("builtins.input", input_mock)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        with pytest.raises(SystemExit) as exc:
+            main(["haunt", "--demo", "--suggest", "--yes"])
+        assert exc.value.code == 0
+
+    assert input_mock.call_count == 0
+
+    out = capsys.readouterr().out
+    assert "haunt --demo --suggest --yes" in out
+    assert "AI-Suggested Test" in out
+    assert "Checking this test against original and mutated code…" in out
+    # Must print brief notice that automatic verification executes generated Python
+    assert "NOTICE (--yes): Automatic verification executes generated Python code" in out
+    # Verification actually executes and marks VERIFIED
+    assert "Original passes + mutant fails: VERIFIED for this mutation." in out
+
+
+def test_cli_staged_suggest_yes_never_calls_input_including_during_retry(tmp_path: Path, monkeypatch, capsys):
+    """'ghost haunt --suggest --yes' never calls input(), even across an automatic retry."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+
+    (repo / "shipping.py").write_text(
+        "def shipping_cost(weight: int) -> int:\n"
+        "    if weight <= 5:\n"
+        "        return 50\n"
+        "    return 100\n",
+        encoding="utf-8",
+    )
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_shipping.py").write_text(
+        "from shipping import shipping_cost\n\n"
+        "def test_light():\n"
+        "    assert shipping_cost(2) == 50\n\n"
+        "def test_heavy():\n"
+        "    assert shipping_cost(8) == 100\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "shipping.py", "tests"], cwd=repo, check=True)
+
+    # 1st attempt: Inverted assertion (fails on original -> REJECTED)
+    bad_test = "from shipping import shipping_cost\ndef test_bound(): assert shipping_cost(5) == 100\n"
+    # 2nd attempt: Correct assertion -> VERIFIED
+    good_test = "from shipping import shipping_cost\ndef test_bound(): assert shipping_cost(5) == 50\n"
+
+    resp_1 = _make_mock_ollama_response(bad_test)
+    resp_2 = _make_mock_ollama_response(good_test)
+
+    # input() must never be called on either attempt
+    input_mock = MagicMock(side_effect=AssertionError("input() must not be called when --yes is supplied"))
+    monkeypatch.setattr("builtins.input", input_mock)
+
+    with patch("urllib.request.urlopen", side_effect=[resp_1, resp_2]) as mock_url:
+        with pytest.raises(SystemExit) as exc:
+            main(["haunt", "--suggest", "--yes", "--repo", str(repo)])
+        assert exc.value.code == 0
+        assert mock_url.call_count == 2
+
+    assert input_mock.call_count == 0
+
+    out = capsys.readouterr().out
+    assert "haunt (staged changes) --suggest --yes" in out
+    # Notice printed exactly once
+    assert out.count("NOTICE (--yes)") == 1
+    # First attempt rejected, retry triggered automatically without prompting
+    assert "Original fails: REJECTED" in out
+    assert "Initial suggested test was REJECTED. Requesting 1 feedback-based revision" in out
+    assert "AI-Suggested Test (Revised)" in out
+    # Final retry verified
+    assert "Original passes + mutant fails: VERIFIED for this mutation." in out
+
+
+def test_default_without_yes_still_prompts(tmp_path: Path, monkeypatch, capsys):
+    """Without --yes, the default interactive behavior prompts the user for consent."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+
+    (repo / "shipping.py").write_text(
+        "def shipping_cost(weight: int) -> int:\n"
+        "    if weight <= 5:\n"
+        "        return 50\n"
+        "    return 100\n",
+        encoding="utf-8",
+    )
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_shipping.py").write_text(
+        "from shipping import shipping_cost\ndef test_l(): assert shipping_cost(2) == 50\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "shipping.py", "tests"], cwd=repo, check=True)
+
+    good_test = "from shipping import shipping_cost\ndef test_b(): assert shipping_cost(5) == 50\n"
+    resp = _make_mock_ollama_response(good_test)
+
+    input_mock = MagicMock(return_value="y")
+    monkeypatch.setattr("builtins.input", input_mock)
+
+    with patch("urllib.request.urlopen", return_value=resp):
+        with pytest.raises(SystemExit) as exc:
+            main(["haunt", "--suggest", "--repo", str(repo)])
+        assert exc.value.code == 0
+
+    # input() was called to prompt for consent
+    assert input_mock.call_count == 1
+    assert "Execute and verify this suggested test?" in input_mock.call_args[0][0]

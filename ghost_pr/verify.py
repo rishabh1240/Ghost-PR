@@ -548,11 +548,12 @@ def prompt_verification_consent() -> bool:
     try:
         response = input("  Execute and verify this suggested test? [y/N]: ").strip().lower()
         if response in ("y", "yes"):
+            print("\n  Checking this test against original and mutated code…\n")
             return True
-        print("\n  Declined test verification — suggested test was not executed.\n")
+        print("\n  Verification skipped.\n")
         return False
     except (EOFError, OSError, KeyboardInterrupt):
-        print("\n  Declined test verification — suggested test was not executed.\n")
+        print("\n  Verification skipped.\n")
         return False
 
 
@@ -634,16 +635,37 @@ def display_verification_result(result: VerificationResult) -> None:
         print(f"      Reason: {result.reason}\n")
 
 
+_AUTO_YES_NOTICE_PRINTED = False
+
+
+def print_auto_yes_notice() -> None:
+    """Print one brief notice that automatic verification executes generated Python locally."""
+    global _AUTO_YES_NOTICE_PRINTED
+    if not _AUTO_YES_NOTICE_PRINTED:
+        print("\n  ⚠️   NOTICE (--yes): Automatic verification executes generated Python code in temporary folders.")
+        print("      Temporary directories isolate file changes, but they are NOT a security sandbox.\n")
+        _AUTO_YES_NOTICE_PRINTED = True
+
+
+def reset_auto_yes_notice() -> None:
+    """Reset the auto_yes notice flag (useful for testing or fresh sessions)."""
+    global _AUTO_YES_NOTICE_PRINTED
+    _AUTO_YES_NOTICE_PRINTED = False
+
+
 def run_verification_flow(
     test_code: str,
     original_source: str,
     mutated_source: str,
     *,
     ask_consent: bool = True,
+    auto_yes: bool = False,
     timeout: int = 30,
 ) -> Optional[VerificationResult]:
-    """Coordinate the full interactive verification workflow."""
-    if ask_consent:
+    """Coordinate the full interactive or non-interactive verification workflow."""
+    if auto_yes:
+        print_auto_yes_notice()
+    elif ask_consent:
         consent = prompt_verification_consent()
         if not consent:
             return None
@@ -783,10 +805,13 @@ def run_staged_verification_flow(
     test_code: str,
     *,
     ask_consent: bool = True,
+    auto_yes: bool = False,
     timeout: int = 30,
 ) -> Optional[VerificationResult]:
-    """Coordinate the interactive verification workflow for staged changes."""
-    if ask_consent:
+    """Coordinate the verification workflow for staged changes."""
+    if auto_yes:
+        print_auto_yes_notice()
+    elif ask_consent:
         consent = prompt_verification_consent()
         if not consent:
             return None

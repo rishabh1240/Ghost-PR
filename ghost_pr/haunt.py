@@ -69,14 +69,20 @@ def haunt_staged_changes(
     repo_dir: Path | str | None = None,
     suggest: bool = False,
     model: str | None = None,
+    yes: bool = False,
 ) -> int:
     """Run mutation testing on staged Python changes in a Git repository.
 
     Returns exit code 0 on successful execution or clean skip, 1 on errors or failures.
     """
+    from ghost_pr.verify import reset_auto_yes_notice
+    reset_auto_yes_notice()
+
     title = "👻  Ghost-PR  ·  haunt (staged changes)"
     if suggest:
         title += " --suggest"
+    if yes:
+        title += " --yes"
     _banner(title)
 
     # 1. Find the current Git repository root
@@ -309,7 +315,7 @@ def haunt_staged_changes(
                         import_path=target_info.import_path,
                         model=model,
                     )
-                    display_suggestion(suggestion)
+                    display_suggestion(suggestion, auto_yes=yes)
 
                     # Prompt interactive consent and run verification if accepted
                     if suggestion.is_success and suggestion.test_code:
@@ -317,6 +323,7 @@ def haunt_staged_changes(
                             pristine_snapshot=pristine_snapshot,
                             candidate=cand,
                             test_code=suggestion.test_code,
+                            auto_yes=yes,
                         )
 
                         # At most ONE feedback-based retry if REJECTED or NON-DISTINGUISHING
@@ -345,13 +352,14 @@ def haunt_staged_changes(
                                 import_path=target_info.import_path,
                                 model=model,
                             )
-                            display_suggestion(revised, is_retry=True)
+                            display_suggestion(revised, is_retry=True, auto_yes=yes)
 
                             if revised.is_success and revised.test_code:
                                 run_staged_verification_flow(
                                     pristine_snapshot=pristine_snapshot,
                                     candidate=cand,
                                     test_code=revised.test_code,
+                                    auto_yes=yes,
                                 )
 
     finally:

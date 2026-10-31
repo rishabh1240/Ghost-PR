@@ -358,10 +358,10 @@ def test_ollama_malformed_code_response_handled_gracefully():
     assert "Model response was malformed" in result.error
 
 
-# ── 5. UNVERIFIED Label and Disclaimer ──────────────────────────────
+# ── 5. AI-Suggested Test Display ────────────────────────────────────
 
 def test_display_suggestion_unverified_labels(capsys):
-    """Output MUST be explicitly labeled UNVERIFIED and state that generation is not verification."""
+    """Output displays AI-Suggested Test with clean status and no disclaimer block."""
     result = SuggestionResult(
         test_code="def test_sample():\n    assert True",
         error=None,
@@ -371,11 +371,16 @@ def test_display_suggestion_unverified_labels(capsys):
     display_suggestion(result)
     out = capsys.readouterr().out
 
-    assert "AI Test Suggestion [UNVERIFIED]" in out
-    assert "Status : UNVERIFIED (Generation alone is not verification)" in out
-    assert "DISCLAIMER: This test is UNVERIFIED" in out
-    assert "This test has NOT been executed or added to your project files" in out
+    assert "AI-Suggested Test" in out
+    assert "This test has not been added to your project." in out
+    assert "Not yet executed." in out
     assert "def test_sample():" in out
+    assert "Status : UNVERIFIED" not in out
+    assert "DISCLAIMER: This test is UNVERIFIED" not in out
+
+    display_suggestion(result, auto_yes=True)
+    out_yes = capsys.readouterr().out
+    assert "Checking this test against original and mutated code…" in out_yes
 
 
 def test_display_suggestion_error_labels(capsys):
@@ -389,7 +394,7 @@ def test_display_suggestion_error_labels(capsys):
     display_suggestion(result)
     out = capsys.readouterr().out
 
-    assert "AI Test Suggestion [UNVERIFIED]" in out
+    assert "AI-Suggested Test" in out
     assert "Could not generate AI test suggestion:" in out
     assert "Mutation testing results above were not affected" in out
 
@@ -415,10 +420,12 @@ def test_cli_demo_suggest_success(capsys):
     out = capsys.readouterr().out
     assert "Ghost-PR  ·  haunt --demo --suggest" in out
     assert "MUTANT SURVIVED" in out
-    assert "AI Test Suggestion [UNVERIFIED]" in out
+    assert "AI-Suggested Test" in out
     assert "def test_withdraw_boundary():" in out
     assert "assert withdraw(100, 100) == 0" in out
-    assert "DISCLAIMER: This test is UNVERIFIED" in out
+    assert "This test has not been added to your project." in out
+    assert "Not yet executed." in out
+    assert "DISCLAIMER: This test is UNVERIFIED" not in out
 
 
 def test_cli_demo_suggest_with_custom_model(capsys):
