@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "setuptools-scm"]
+requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,6 +13,14 @@ dependencies = ["pytest>=7.0"]
 
 [project.scripts]
 ghost = "ghost_pr.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ghost_pr*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+"ghost_pr.demo_fixtures" = ["*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
